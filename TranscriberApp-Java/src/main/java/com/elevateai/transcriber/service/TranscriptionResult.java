@@ -1,5 +1,7 @@
 package com.elevateai.transcriber.service;
 
+import com.google.gson.JsonParser;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -53,7 +55,7 @@ public class TranscriptionResult {
     }
 
     public static TranscriptionResult fromSessionEnded(String json) {
-        var root = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+        var root = JsonParser.parseString(json).getAsJsonObject();
         var content = root.getAsJsonObject("content");
         String interactionId = content.has("interactionIdentifier")
                 ? content.get("interactionIdentifier").getAsString() : "";

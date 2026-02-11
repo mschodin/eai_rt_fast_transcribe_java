@@ -3,21 +3,21 @@ package com.elevateai.transcriber.service;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
 import java.net.http.WebSocketHandshakeException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 /**
@@ -248,10 +248,10 @@ public class ElevateAiTranscriber {
                 try {
                     URI httpsUri = URI.create(uri.toString().replaceFirst("^wss://", "https://"));
                     var diagResp = client.send(
-                            java.net.http.HttpRequest.newBuilder(httpsUri)
+                            HttpRequest.newBuilder(httpsUri)
                                     .header("X-API-TOKEN", apiToken)
                                     .GET().build(),
-                            java.net.http.HttpResponse.BodyHandlers.ofString());
+                            HttpResponse.BodyHandlers.ofString());
                     diagBody = diagResp.body();
                     if (diagBody.length() > 500) diagBody = diagBody.substring(0, 500);
                     onMessage.accept("Diagnostic response (HTTP " + diagResp.statusCode() + "): " + diagBody);
@@ -295,8 +295,8 @@ public class ElevateAiTranscriber {
         pb.redirectErrorStream(true);
         Process proc = pb.start();
         String output;
-        try (InputStream is = proc.getInputStream()) {
-            output = new String(readAllBytes(is), StandardCharsets.UTF_8);
+        try (var is = proc.getInputStream()) {
+            output = new String(is.readAllBytes(), StandardCharsets.UTF_8);
         }
         proc.waitFor(); // exit code will be non-zero (no output specified) — that's expected
 
@@ -314,7 +314,7 @@ public class ElevateAiTranscriber {
      * If channelIndex is 0 or 1, extract that specific channel from a stereo file.
      */
     private static byte[] convertToPcm(String inputPath, int sampleRate, int channelIndex) throws Exception {
-        var cmd = new java.util.ArrayList<String>();
+        var cmd = new ArrayList<String>();
         cmd.add("ffmpeg");
         cmd.add("-i");
         cmd.add(inputPath);
@@ -340,30 +340,20 @@ public class ElevateAiTranscriber {
         Process proc = pb.start();
 
         byte[] pcmData;
-        try (InputStream stdout = proc.getInputStream()) {
-            pcmData = readAllBytes(stdout);
+        try (var stdout = proc.getInputStream()) {
+            pcmData = stdout.readAllBytes();
         }
 
         int exitCode = proc.waitFor();
         if (exitCode != 0) {
             byte[] errBytes;
-            try (InputStream stderr = proc.getErrorStream()) {
-                errBytes = readAllBytes(stderr);
+            try (var stderr = proc.getErrorStream()) {
+                errBytes = stderr.readAllBytes();
             }
             throw new IOException("ffmpeg failed (exit " + exitCode + "): "
                     + new String(errBytes, StandardCharsets.UTF_8));
         }
         return pcmData;
-    }
-
-    private static byte[] readAllBytes(InputStream in) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
-        int n;
-        while ((n = in.read(buf)) != -1) {
-            out.write(buf, 0, n);
-        }
-        return out.toByteArray();
     }
 
     // --- WebSocket listener ---
