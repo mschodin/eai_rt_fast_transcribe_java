@@ -51,18 +51,24 @@ public class ElevateAiTranscriber {
         byte[] pcmData = convertToPcm(filePath, sampleRate, -1);
         onMessage.accept("Conversion complete. PCM size: " + String.format("%,d", pcmData.length) + " bytes");
 
+        Exception lastError = null;
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             String sessionId = UUID.randomUUID().toString();
             onMessage.accept("Attempt " + attempt + "/" + MAX_RETRIES + " — Session ID: " + sessionId);
 
             try {
                 return doTranscribeMono(apiToken, pcmData, sessionId, onMessage, languageTag, sampleRate);
-            } catch (TimeoutException e) {
-                onMessage.accept("Timed out waiting for sessionEnded. " +
-                        (attempt < MAX_RETRIES ? "Retrying with new session..." : "All retries exhausted."));
+            } catch (Exception e) {
+                lastError = e;
+                onMessage.accept("Attempt " + attempt + " failed: " + e.getMessage());
+                if (attempt < MAX_RETRIES) {
+                    onMessage.accept("Waiting 2s before retry...");
+                    Thread.sleep(2000);
+                    onMessage.accept("Retrying with new session...");
+                }
             }
         }
-        throw new Exception("Failed after " + MAX_RETRIES + " attempts — sessionEnded never received.");
+        throw new Exception("Failed after " + MAX_RETRIES + " attempts: " + lastError.getMessage(), lastError);
     }
 
     private static TranscriptionResult doTranscribeMono(String apiToken, byte[] pcmData, String sessionId,
@@ -76,7 +82,7 @@ public class ElevateAiTranscriber {
         CompletableFuture<String> sessionEndedJsonFuture = new CompletableFuture<>();
 
         WebSocket ws = connectWebSocket(client, uri, apiToken,
-                new SessionListener(onMessage, interactionIdFuture, sessionEndedJsonFuture));
+                new SessionListener(onMessage, interactionIdFuture, sessionEndedJsonFuture), onMessage);
 
         onMessage.accept("WebSocket connected.");
         streamAudio(ws, pcmData, onMessage);
@@ -101,6 +107,7 @@ public class ElevateAiTranscriber {
         byte[] pcmChannel1 = convertToPcm(filePath, sampleRate, 1);
         onMessage.accept("Channel 1 PCM size: " + String.format("%,d", pcmChannel1.length) + " bytes");
 
+        Exception lastError = null;
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             String sessionId = UUID.randomUUID().toString();
             onMessage.accept("Attempt " + attempt + "/" + MAX_RETRIES + " — Session ID: " + sessionId);
@@ -108,12 +115,17 @@ public class ElevateAiTranscriber {
             try {
                 return doTranscribeStereo(apiToken, pcmChannel0, pcmChannel1, sessionId,
                         onMessage, languageTag, sampleRate);
-            } catch (TimeoutException e) {
-                onMessage.accept("Timed out waiting for sessionEnded. " +
-                        (attempt < MAX_RETRIES ? "Retrying with new session..." : "All retries exhausted."));
+            } catch (Exception e) {
+                lastError = e;
+                onMessage.accept("Attempt " + attempt + " failed: " + e.getMessage());
+                if (attempt < MAX_RETRIES) {
+                    onMessage.accept("Waiting 2s before retry...");
+                    Thread.sleep(2000);
+                    onMessage.accept("Retrying with new session...");
+                }
             }
         }
-        throw new Exception("Failed after " + MAX_RETRIES + " attempts — sessionEnded never received.");
+        throw new Exception("Failed after " + MAX_RETRIES + " attempts: " + lastError.getMessage(), lastError);
     }
 
     private static TranscriptionResult doTranscribeStereo(String apiToken,
@@ -131,12 +143,12 @@ public class ElevateAiTranscriber {
         // but we only need to capture once
         onMessage.accept("Connecting channel 0 (Agent)...");
         WebSocket ws0 = connectWebSocket(client, uri0, apiToken,
-                new SessionListener(onMessage, interactionIdFuture, sessionEndedJsonFuture));
+                new SessionListener(onMessage, interactionIdFuture, sessionEndedJsonFuture), onMessage);
         onMessage.accept("Channel 0 connected.");
 
         onMessage.accept("Connecting channel 1 (Customer)...");
         WebSocket ws1 = connectWebSocket(client, uri1, apiToken,
-                new SessionListener(onMessage, interactionIdFuture, sessionEndedJsonFuture));
+                new SessionListener(onMessage, interactionIdFuture, sessionEndedJsonFuture), onMessage);
         onMessage.accept("Channel 1 connected.");
 
         // Stream both channels in parallel
@@ -174,7 +186,8 @@ public class ElevateAiTranscriber {
     }
 
     private static WebSocket connectWebSocket(HttpClient client, URI uri, String apiToken,
-                                                 WebSocket.Listener listener) throws Exception {
+                                                 WebSocket.Listener listener,
+                                                 Consumer<String> onMessage) throws Exception {
         try {
             return client.newWebSocketBuilder()
                     .header("X-API-TOKEN", apiToken)
@@ -183,16 +196,23 @@ public class ElevateAiTranscriber {
         } catch (CompletionException ce) {
             Throwable cause = ce.getCause();
             if (cause instanceof WebSocketHandshakeException wse) {
-                var response = wse.getResponse();
-                String body = "";
-                // Try to read the response body for error details
+                int status = wse.getResponse().statusCode();
+                // Make a diagnostic HTTPS GET to see the actual response body
+                String diagBody = "";
                 try {
-                    if (response.body() != null) {
-                        body = response.body().toString();
-                    }
-                } catch (Exception ignored) {}
-                throw new Exception("WebSocket handshake failed (HTTP " + response.statusCode()
-                        + "): " + body, cause);
+                    URI httpsUri = URI.create(uri.toString().replaceFirst("^wss://", "https://"));
+                    var diagResp = client.send(
+                            java.net.http.HttpRequest.newBuilder(httpsUri)
+                                    .header("X-API-TOKEN", apiToken)
+                                    .GET().build(),
+                            java.net.http.HttpResponse.BodyHandlers.ofString());
+                    diagBody = diagResp.body();
+                    if (diagBody.length() > 500) diagBody = diagBody.substring(0, 500);
+                    onMessage.accept("Diagnostic response (HTTP " + diagResp.statusCode() + "): " + diagBody);
+                } catch (Exception diagErr) {
+                    onMessage.accept("Diagnostic probe failed: " + diagErr.getMessage());
+                }
+                throw new Exception("WebSocket handshake failed (HTTP " + status + "): " + diagBody, cause);
             }
             throw new Exception("WebSocket connection failed: " + cause.getMessage(), cause);
         }
