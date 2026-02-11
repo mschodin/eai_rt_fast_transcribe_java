@@ -39,14 +39,8 @@
             <strong>Interaction ID:</strong> <span id="interactionId"></span>
         </div>
 
-        <h3 class="mt-4">Participant One (Agent)</h3>
-        <div id="participantOneText" class="transcript-box transcript-p1"></div>
-
-        <h3 class="mt-3">Participant Two (Customer)</h3>
-        <div id="participantTwoText" class="transcript-box transcript-p2"></div>
-
-        <h3 class="mt-3">Full Transcript</h3>
-        <div id="fullTranscriptText" class="transcript-box"></div>
+        <h3 class="mt-4">Transcript</h3>
+        <div id="chatTranscript" class="chat-container"></div>
     </div>
 </div>
 
@@ -65,6 +59,60 @@
         while (el.firstChild) {
             el.removeChild(el.firstChild);
         }
+    }
+
+    function formatTime(ms) {
+        const totalSec = Math.floor(ms / 1000);
+        const min = Math.floor(totalSec / 60);
+        const sec = totalSec % 60;
+        return min + ':' + String(sec).padStart(2, '0');
+    }
+
+    function renderTranscript(result) {
+        const container = document.getElementById('chatTranscript');
+        clearElement(container);
+
+        document.getElementById('interactionId').textContent =
+            result.interactionIdentifier || '(none)';
+
+        const segments = result.segments || [];
+        if (segments.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'text-muted p-3';
+            empty.textContent = '(no speech detected)';
+            container.appendChild(empty);
+            return;
+        }
+
+        segments.forEach(function (seg) {
+            const isP1 = seg.participant === 'participantOne';
+            const label = isP1 ? 'Agent' : 'Customer';
+
+            const bubble = document.createElement('div');
+            bubble.className = 'chat-bubble ' + (isP1 ? 'chat-p1' : 'chat-p2');
+
+            const header = document.createElement('div');
+            header.className = 'chat-header';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'chat-name';
+            nameSpan.textContent = label;
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'chat-time';
+            timeSpan.textContent = formatTime(seg.startMs);
+
+            header.appendChild(nameSpan);
+            header.appendChild(timeSpan);
+
+            const text = document.createElement('div');
+            text.className = 'chat-text';
+            text.textContent = seg.phrase;
+
+            bubble.appendChild(header);
+            bubble.appendChild(text);
+            container.appendChild(bubble);
+        });
     }
 
     async function startTranscription() {
@@ -117,19 +165,7 @@
             source.addEventListener('transcript', function (e) {
                 try {
                     const result = JSON.parse(e.data);
-
-                    document.getElementById('interactionId').textContent =
-                        result.interactionIdentifier || '(none)';
-
-                    document.getElementById('participantOneText').textContent =
-                        result.participantOne || '(no speech detected)';
-
-                    document.getElementById('participantTwoText').textContent =
-                        result.participantTwo || '(no speech detected)';
-
-                    document.getElementById('fullTranscriptText').textContent =
-                        result.fullTranscript || '(empty)';
-
+                    renderTranscript(result);
                     resultSection.style.display = 'block';
                     addMessage(logDiv, '--- TRANSCRIPTION COMPLETE ---');
                 } catch (parseErr) {

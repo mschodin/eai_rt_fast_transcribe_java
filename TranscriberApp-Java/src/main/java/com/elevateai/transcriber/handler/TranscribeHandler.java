@@ -12,6 +12,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 public class TranscribeHandler implements HttpHandler {
@@ -65,12 +66,14 @@ public class TranscribeHandler implements HttpHandler {
                 }
             });
 
-            // Send result as a structured JSON event
+            // Send result as a structured JSON event with segments for turn-by-turn display
+            List<SegmentPayload> segments = result.getSegments().stream()
+                    .map(s -> new SegmentPayload(s.participant(), s.phrase(),
+                            s.startTimeOffset(), s.endTimeOffset()))
+                    .toList();
             ResultPayload payload = new ResultPayload(
                     result.getInteractionIdentifier(),
-                    result.getParticipantOneTranscript(),
-                    result.getParticipantTwoTranscript(),
-                    result.getFullTranscript()
+                    segments
             );
             String jsonPayload = GSON.toJson(payload);
 
@@ -104,9 +107,11 @@ public class TranscribeHandler implements HttpHandler {
         return params;
     }
 
+    private record SegmentPayload(String participant, String phrase,
+                                   int startMs, int endMs) {
+    }
+
     private record ResultPayload(String interactionIdentifier,
-                                 String participantOne,
-                                 String participantTwo,
-                                 String fullTranscript) {
+                                 List<SegmentPayload> segments) {
     }
 }
