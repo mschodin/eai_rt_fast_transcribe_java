@@ -1,0 +1,74 @@
+name: Supabase Migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/supabase/migrations/**'
+
+permissions:
+  contents: read
+
+env:
+  SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+jobs:
+  migrate-test:
+    name: Migrate Test DB
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to test project
+        working-directory: apps/web
+        run: supabase link --project-ref ${{ secrets.SUPABASE_TEST_PROJECT_REF }}
+
+      - name: Apply migrations to test DB
+        working-directory: apps/web
+        run: supabase db push
+
+      - name: Set environment_name to 'test'
+        run: |
+          curl -sf -X POST \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_TEST_PROJECT_REF }}/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "INSERT INTO public.app_config (key, value) VALUES ('\''environment_name'\'', '\''test'\'') ON CONFLICT (key) DO UPDATE SET value = '\''test'\'';"}'
+
+  migrate-prod:
+    name: Migrate Production DB
+    needs: [migrate-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to production project
+        working-directory: apps/web
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROD_PROJECT_REF }}
+
+      - name: Apply migrations to production DB
+        working-directory: apps/web
+        run: supabase db push
+
+      - name: Set environment_name to 'production'
+        run: |
+          curl -sf -X POST \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROD_PROJECT_REF }}/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "INSERT INTO public.app_config (key, value) VALUES ('\''environment_name'\'', '\''production'\'') ON CONFLICT (key) DO UPDATE SET value = '\''production'\'';"}'

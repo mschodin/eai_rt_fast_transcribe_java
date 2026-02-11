@@ -1,0 +1,113 @@
+@page "/"
+@rendermode InteractiveServer
+@using TranscriberApp.Services
+
+<h2>ElevateAI Real-Time Transcriber</h2>
+
+<div style="margin-bottom: 1rem;">
+    <label><strong>API Token</strong></label><br/>
+    <input type="password" @bind="apiToken" style="width: 100%; padding: 0.5rem; font-size: 1rem;" placeholder="Your ElevateAI API token" />
+</div>
+
+<div style="margin-bottom: 1rem;">
+    <label><strong>Audio File (m4a, wav, mp3, etc.)</strong></label><br/>
+    <InputFile OnChange="OnFileSelected" accept=".m4a,.wav,.mp3,.ogg,.flac,.aac,.wma" />
+    @if (!string.IsNullOrEmpty(selectedFileName))
+    {
+        <span style="margin-left: 0.5rem; color: #666;">@selectedFileName</span>
+    }
+</div>
+
+<button @onclick="StartTranscription" disabled="@isRunning"
+        style="padding: 0.6rem 1.5rem; font-size: 1rem; cursor: pointer; background: #2563eb; color: white; border: none; border-radius: 4px;">
+    @(isRunning ? "Transcribing..." : "Start Transcription")
+</button>
+
+<h3 style="margin-top: 2rem;">Messages</h3>
+<div style="background: #111; color: #0f0; padding: 1rem; height: 400px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; border-radius: 4px; white-space: pre-wrap;">
+    @foreach (var msg in messages)
+    {
+        <div>@msg</div>
+    }
+</div>
+
+@if (!string.IsNullOrEmpty(finalTranscript))
+{
+    <h3 style="margin-top: 1.5rem;">Final Transcript</h3>
+    <div style="background: #f0f9ff; border: 1px solid #bae6fd; padding: 1rem; border-radius: 4px;">
+        @finalTranscript
+    </div>
+}
+
+@code {
+    private string apiToken = "";
+    private string selectedFileName = "";
+    private string? uploadedFilePath;
+    private bool isRunning;
+    private List<string> messages = new();
+    private string? finalTranscript;
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        selectedFileName = file.Name;
+
+        var tempPath = Path.Combine(Path.GetTempPath(), $"elevateai_{Guid.NewGuid()}{Path.GetExtension(file.Name)}");
+        await using var fs = new FileStream(tempPath, FileMode.Create);
+        await file.OpenReadStream(maxAllowedSize: 500 * 1024 * 1024).CopyToAsync(fs);
+        uploadedFilePath = tempPath;
+
+        AddMessage($"File loaded: {file.Name} ({file.Size:N0} bytes)");
+    }
+
+    private async Task StartTranscription()
+    {
+        if (string.IsNullOrWhiteSpace(apiToken))
+        {
+            AddMessage("ERROR: Please enter your API token.");
+            return;
+        }
+        if (string.IsNullOrEmpty(uploadedFilePath))
+        {
+            AddMessage("ERROR: Please select an audio file.");
+            return;
+        }
+
+        isRunning = true;
+        finalTranscript = null;
+        messages.Clear();
+        StateHasChanged();
+
+        try
+        {
+            var result = await ElevateAiTranscriber.TranscribeFileAsync(
+                apiToken,
+                uploadedFilePath,
+                onMessage: msg =>
+                {
+                    InvokeAsync(() =>
+                    {
+                        AddMessage(msg);
+                        StateHasChanged();
+                    });
+                });
+
+            finalTranscript = result;
+            AddMessage("--- TRANSCRIPTION COMPLETE ---");
+        }
+        catch (Exception ex)
+        {
+            AddMessage($"ERROR: {ex.Message}");
+        }
+        finally
+        {
+            isRunning = false;
+            StateHasChanged();
+        }
+    }
+
+    private void AddMessage(string msg)
+    {
+        messages.Add($"[{DateTime.Now:HH:mm:ss}] {msg}");
+    }
+}

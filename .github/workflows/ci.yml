@@ -1,0 +1,437 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'apps/web/package-lock.json'
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: apps/web
+        run: npm run lint
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'apps/web/package-lock.json'
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Run TypeScript compiler
+        working-directory: apps/web
+        run: npm run typecheck
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'apps/web/package-lock.json'
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Run tests
+        working-directory: apps/web
+        run: npx vitest run --reporter=default --reporter=junit --outputFile=test-results/junit.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: unit-test-results
+          path: apps/web/test-results/junit.xml
+          retention-days: 14
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'apps/web/package-lock.json'
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Build application
+        working-directory: apps/web
+        run: npm run build
+
+  await-preview:
+    name: Await Vercel Preview
+    if: github.event_name == 'pull_request'
+    needs: [lint, typecheck, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      preview_url: ${{ steps.wait.outputs.url }}
+    steps:
+      - name: Wait for Vercel deployment
+        id: wait
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "Waiting for Vercel deployment for commit $COMMIT_SHA..."
+          for i in $(seq 1 30); do
+            RESPONSE=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&limit=5")
+            URL=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for d in data.get('deployments', []):
+              meta = d.get('meta', {})
+              if meta.get('githubCommitSha') == '$COMMIT_SHA':
+                  if d['state'] == 'READY':
+                      print('https://' + d['url'])
+                      break
+                  elif d['state'] in ('ERROR', 'CANCELED'):
+                      print('FAILED')
+                      break
+          " 2>/dev/null)
+            if [ "$URL" = "FAILED" ]; then
+              echo "::error::Vercel deployment failed"
+              exit 1
+            elif [ -n "$URL" ]; then
+              echo "Preview URL: $URL"
+              echo "url=$URL" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $i/30 — deployment not ready yet, waiting 20s..."
+            sleep 20
+          done
+          echo "::error::Timed out waiting for Vercel deployment"
+          exit 1
+
+      - name: Post preview URL to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = '${{ steps.wait.outputs.url }}';
+            const body = `### Vercel Preview Deployment\n\n🔗 **Preview:** ${url}\n\nCommit: \`${context.sha.slice(0, 7)}\``;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes('Vercel Preview Deployment'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  e2e-preview:
+    name: E2E Tests (Preview)
+    if: github.event_name == 'pull_request'
+    needs: [await-preview]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'apps/web/package-lock.json'
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests against preview
+        working-directory: apps/web
+        run: npm run test:e2e
+        env:
+          BASE_URL: ${{ needs.await-preview.outputs.preview_url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_TEST_EMAIL: e2e-test@rapid.test
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          ECHO_AGENT_URL: https://rapid-agents.vercel.app/echo
+          WEATHER_AGENT_URL: https://rapid-agents.vercel.app/weather
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-preview
+          path: apps/web/playwright-report/
+          retention-days: 14
+
+      - name: Upload page screenshots
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: page-screenshots-preview
+          path: apps/web/e2e-screenshots/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Comment screenshots link on PR
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const dir = 'apps/web/e2e-screenshots';
+            let files = [];
+            if (fs.existsSync(dir)) {
+              files = fs.readdirSync(dir)
+                .filter(f => f.endsWith('.png'))
+                .sort();
+            }
+
+            const routeMap = {
+              '01-home.png': ['Home', '`/`'],
+              '02-login.png': ['Login', '`/login`'],
+              '03-signup.png': ['Signup', '`/signup`'],
+              '04-404.png': ['404', '`/nonexistent-page`'],
+              '05-agents-empty.png': ['Agents (empty)', '`/agents`'],
+              '06-agents-list.png': ['Agents (with agents)', '`/agents`'],
+              '07-agent-detail.png': ['Agent detail', '`/agents/:id`'],
+              '08-chat-empty.png': ['Chat (empty)', '`/chat`'],
+              '09-chat-conversation.png': ['Chat (conversation)', '`/chat`'],
+              '10-tasks-list.png': ['Tasks list', '`/tasks`'],
+              '11-task-detail.png': ['Task detail', '`/tasks/:id`'],
+              '12-inspector.png': ['Inspector', '`/inspector`'],
+            };
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            let rows = '';
+            for (const f of files) {
+              const info = routeMap[f];
+              if (info) {
+                const num = f.split('-')[0];
+                rows += `| ${num} | ${info[0]} | ${info[1]} |\n`;
+              }
+            }
+
+            const body = [
+              '### Page Screenshots',
+              '',
+              `${files.length} page(s) captured from the Vercel preview deployment.`,
+              '',
+              '| # | Page | Route |',
+              '|---|------|-------|',
+              rows.trimEnd(),
+              '',
+              `📦 **[Download screenshots](${runUrl})** → Artifacts → \`page-screenshots-preview\``,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body?.includes('### Page Screenshots'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  await-production:
+    name: Await Vercel Production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, typecheck, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      production_url: ${{ steps.wait.outputs.url }}
+    steps:
+      - name: Wait for Vercel production deployment
+        id: wait
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          echo "Waiting for Vercel production deployment for commit $COMMIT_SHA..."
+          for i in $(seq 1 30); do
+            RESPONSE=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&limit=5&target=production")
+            URL=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for d in data.get('deployments', []):
+              meta = d.get('meta', {})
+              if meta.get('githubCommitSha') == '$COMMIT_SHA':
+                  if d['state'] == 'READY':
+                      print('https://' + d['url'])
+                      break
+                  elif d['state'] in ('ERROR', 'CANCELED'):
+                      print('FAILED')
+                      break
+          " 2>/dev/null)
+            if [ "$URL" = "FAILED" ]; then
+              echo "::error::Vercel production deployment failed"
+              exit 1
+            elif [ -n "$URL" ]; then
+              echo "Production URL: $URL"
+              echo "url=$URL" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $i/30 — deployment not ready yet, waiting 20s..."
+            sleep 20
+          done
+          echo "::error::Timed out waiting for Vercel production deployment"
+          exit 1
+
+  e2e-prod:
+    name: E2E Tests (Production)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [await-production]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'apps/web/package-lock.json'
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests against production
+        working-directory: apps/web
+        run: npm run test:e2e
+        env:
+          BASE_URL: ${{ needs.await-production.outputs.production_url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          VITE_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_TEST_EMAIL: e2e-test@rapid.test
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          ECHO_AGENT_URL: https://rapid-agents.vercel.app/echo
+          WEATHER_AGENT_URL: https://rapid-agents.vercel.app/weather
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-prod
+          path: apps/web/playwright-report/
+          retention-days: 14
+
+      - name: Upload page screenshots
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: page-screenshots-prod
+          path: apps/web/e2e-screenshots/
+          retention-days: 14
+          if-no-files-found: ignore

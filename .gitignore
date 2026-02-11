@@ -1,0 +1,18 @@
+.vscode
+
+# Java / Maven
+TranscriberApp-Java/target/
+TranscriberApp-Java/dependency-reduced-pom.xml
+
+# .NET build artifacts
+TranscriberApp/bin/
+TranscriberApp/obj/
+
+# Windows NTFS alternate data streams
+*:Zone.Identifier
+
+# IDE
+.idea/
+*.iml
+*.suo
+*.user
