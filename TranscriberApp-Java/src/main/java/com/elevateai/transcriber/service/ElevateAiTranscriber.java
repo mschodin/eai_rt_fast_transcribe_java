@@ -20,17 +20,63 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
+/**
+ * Self-contained ElevateAI Real-Time transcription service.
+ *
+ * <p><b>To copy into another project, you need exactly 2 files:</b></p>
+ * <ol>
+ *   <li>{@code ElevateAiTranscriber.java} (this file)</li>
+ *   <li>{@code TranscriptionResult.java} (result model)</li>
+ * </ol>
+ *
+ * <p><b>Dependencies:</b> Gson ({@code com.google.code.gson:gson:2.11.0}), ffmpeg on PATH</p>
+ *
+ * <p><b>Quick usage — file in, interaction ID out:</b></p>
+ * <pre>{@code
+ * String interactionId = ElevateAiTranscriber.processFile("your-api-token", "/path/to/audio.m4a");
+ * }</pre>
+ *
+ * <p><b>With progress logging:</b></p>
+ * <pre>{@code
+ * TranscriptionResult result = ElevateAiTranscriber.transcribeFile(
+ *     "your-api-token", "/path/to/audio.m4a", msg -> System.out.println(msg));
+ * String interactionId = result.getInteractionIdentifier();
+ * }</pre>
+ */
 public class ElevateAiTranscriber {
 
     private static final int MAX_RETRIES = 3;
     private static final int SESSION_END_TIMEOUT_SECONDS = 10;
     private static final int CHUNK_SIZE = 8192;
 
+    // =========================================================================
+    // PUBLIC API — copy-paste entry points
+    // =========================================================================
+
+    /**
+     * Simplest entry point: file in → interaction ID out.
+     * Accepts mono or stereo audio (m4a, wav, mp3, etc.). Requires ffmpeg on PATH.
+     *
+     * @param apiToken ElevateAI API token
+     * @param filePath path to the audio file
+     * @return the confirmed interaction identifier from sessionEnded
+     * @throws Exception if transcription fails after all retries
+     */
+    public static String processFile(String apiToken, String filePath) throws Exception {
+        return transcribeFile(apiToken, filePath, msg -> {}).getInteractionIdentifier();
+    }
+
+    /**
+     * Full entry point with progress callbacks and complete result.
+     */
     public static TranscriptionResult transcribeFile(String apiToken, String filePath,
                                                      Consumer<String> onMessage) throws Exception {
         return transcribeFile(apiToken, filePath, onMessage, "en", 16000);
     }
 
+    /**
+     * Full entry point with all options.
+     */
     public static TranscriptionResult transcribeFile(String apiToken, String filePath,
                                                      Consumer<String> onMessage,
                                                      String languageTag, int sampleRate) throws Exception {
