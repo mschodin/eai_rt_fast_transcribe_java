@@ -3,7 +3,10 @@ package com.elevateai.transcriber.service;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import java.io.IOException;
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioInputStream;
+import javax.sound.sampled.AudioSystem;
+import java.io.File;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -11,8 +14,6 @@ import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
 import java.net.http.WebSocketHandshakeException;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -29,17 +30,18 @@ import java.util.function.Consumer;
  *   <li>{@code TranscriptionResult.java} (result model)</li>
  * </ol>
  *
- * <p><b>Dependencies:</b> Gson ({@code com.google.code.gson:gson:2.11.0}), ffmpeg on PATH</p>
+ * <p><b>Dependencies:</b> Gson ({@code com.google.code.gson:gson:2.11.0})</p>
+ * <p><b>Input:</b> PCM WAV files (mono or stereo)</p>
  *
  * <p><b>Quick usage — file in, interaction ID out:</b></p>
  * <pre>{@code
- * String interactionId = ElevateAiTranscriber.processFile("your-api-token", "/path/to/audio.m4a");
+ * String interactionId = ElevateAiTranscriber.processFile("your-api-token", "/path/to/audio.wav");
  * }</pre>
  *
  * <p><b>With progress logging:</b></p>
  * <pre>{@code
  * TranscriptionResult result = ElevateAiTranscriber.transcribeFile(
- *     "your-api-token", "/path/to/audio.m4a", msg -> System.out.println(msg));
+ *     "your-api-token", "/path/to/audio.wav", msg -> System.out.println(msg));
  * String interactionId = result.getInteractionIdentifier();
  * }</pre>
  */
@@ -55,10 +57,10 @@ public class ElevateAiTranscriber {
 
     /**
      * Simplest entry point: file in → interaction ID out.
-     * Accepts mono or stereo audio (m4a, wav, mp3, etc.). Requires ffmpeg on PATH.
+     * Accepts mono or stereo PCM WAV files.
      *
      * @param apiToken ElevateAI API token
-     * @param filePath path to the audio file
+     * @param filePath path to a PCM WAV audio file
      * @return the confirmed interaction identifier from sessionEnded
      * @throws Exception if transcription fails after all retries
      */
@@ -71,32 +73,88 @@ public class ElevateAiTranscriber {
      */
     public static TranscriptionResult transcribeFile(String apiToken, String filePath,
                                                      Consumer<String> onMessage) throws Exception {
-        return transcribeFile(apiToken, filePath, onMessage, "en", 16000);
+        return transcribeFile(apiToken, filePath, onMessage, "en");
     }
 
     /**
-     * Full entry point with all options.
+     * Full entry point with language option.
      */
     public static TranscriptionResult transcribeFile(String apiToken, String filePath,
                                                      Consumer<String> onMessage,
-                                                     String languageTag, int sampleRate) throws Exception {
-        int channelCount = detectChannelCount(filePath);
-        onMessage.accept("Detected " + channelCount + " audio channel(s).");
+                                                     String languageTag) throws Exception {
+        WavInfo wav = readWav(filePath);
+        onMessage.accept("WAV: " + wav.channels + " channel(s), " + wav.sampleRate + " Hz, 16-bit PCM. "
+                + String.format("%,d", wav.pcmData.length) + " bytes.");
 
-        if (channelCount >= 2) {
-            return transcribeStereo(apiToken, filePath, onMessage, languageTag, sampleRate);
+        if (wav.channels >= 2) {
+            onMessage.accept("Splitting stereo channels...");
+            byte[][] channels = splitChannels(wav.pcmData);
+            onMessage.accept("Channel 0 (Agent): " + String.format("%,d", channels[0].length) + " bytes");
+            onMessage.accept("Channel 1 (Customer): " + String.format("%,d", channels[1].length) + " bytes");
+            return transcribeStereo(apiToken, channels[0], channels[1], onMessage, languageTag, wav.sampleRate);
         } else {
-            return transcribeMono(apiToken, filePath, onMessage, languageTag, sampleRate);
+            return transcribeMono(apiToken, wav.pcmData, onMessage, languageTag, wav.sampleRate);
         }
     }
 
-    private static TranscriptionResult transcribeMono(String apiToken, String filePath,
+    // =========================================================================
+    // WAV reading — uses javax.sound.sampled (JDK built-in, no ffmpeg)
+    // =========================================================================
+
+    private record WavInfo(int channels, int sampleRate, byte[] pcmData) {}
+
+    /**
+     * Read a WAV file and produce raw 16-bit signed little-endian PCM bytes.
+     * Preserves the original channel count and sample rate.
+     */
+    private static WavInfo readWav(String inputPath) throws Exception {
+        File file = new File(inputPath);
+        try (AudioInputStream sourceAis = AudioSystem.getAudioInputStream(file)) {
+            AudioFormat src = sourceAis.getFormat();
+
+            AudioFormat target = new AudioFormat(
+                    AudioFormat.Encoding.PCM_SIGNED,
+                    src.getSampleRate(),
+                    16,
+                    src.getChannels(),
+                    src.getChannels() * 2, // frame size: channels × 2 bytes per sample
+                    src.getSampleRate(),
+                    false // little-endian
+            );
+
+            if (src.matches(target)) {
+                return new WavInfo(src.getChannels(), (int) src.getSampleRate(), sourceAis.readAllBytes());
+            }
+
+            try (AudioInputStream converted = AudioSystem.getAudioInputStream(target, sourceAis)) {
+                return new WavInfo(target.getChannels(), (int) target.getSampleRate(), converted.readAllBytes());
+            }
+        }
+    }
+
+    /**
+     * Deinterleave stereo 16-bit PCM into two mono streams.
+     * Input layout: [L0_lo, L0_hi, R0_lo, R0_hi, L1_lo, L1_hi, R1_lo, R1_hi, ...]
+     */
+    private static byte[][] splitChannels(byte[] stereoPcm) {
+        byte[] left = new byte[stereoPcm.length / 2];
+        byte[] right = new byte[stereoPcm.length / 2];
+        for (int i = 0, j = 0; i < stereoPcm.length; i += 4, j += 2) {
+            left[j]      = stereoPcm[i];
+            left[j + 1]  = stereoPcm[i + 1];
+            right[j]     = stereoPcm[i + 2];
+            right[j + 1] = stereoPcm[i + 3];
+        }
+        return new byte[][] { left, right };
+    }
+
+    // =========================================================================
+    // Transcription paths
+    // =========================================================================
+
+    private static TranscriptionResult transcribeMono(String apiToken, byte[] pcmData,
                                                       Consumer<String> onMessage,
                                                       String languageTag, int sampleRate) throws Exception {
-        onMessage.accept("Converting audio to PCM (" + sampleRate + " Hz, mono, 16-bit)...");
-        byte[] pcmData = convertToPcm(filePath, sampleRate, -1);
-        onMessage.accept("Conversion complete. PCM size: " + String.format("%,d", pcmData.length) + " bytes");
-
         Exception lastError = null;
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             String sessionId = UUID.randomUUID().toString();
@@ -142,17 +200,10 @@ public class ElevateAiTranscriber {
         return TranscriptionResult.fromSessionEnded(endedJson);
     }
 
-    private static TranscriptionResult transcribeStereo(String apiToken, String filePath,
+    private static TranscriptionResult transcribeStereo(String apiToken,
+                                                        byte[] pcmChannel0, byte[] pcmChannel1,
                                                         Consumer<String> onMessage,
                                                         String languageTag, int sampleRate) throws Exception {
-        onMessage.accept("Converting channel 0 (Agent) to PCM...");
-        byte[] pcmChannel0 = convertToPcm(filePath, sampleRate, 0);
-        onMessage.accept("Channel 0 PCM size: " + String.format("%,d", pcmChannel0.length) + " bytes");
-
-        onMessage.accept("Converting channel 1 (Customer) to PCM...");
-        byte[] pcmChannel1 = convertToPcm(filePath, sampleRate, 1);
-        onMessage.accept("Channel 1 PCM size: " + String.format("%,d", pcmChannel1.length) + " bytes");
-
         Exception lastError = null;
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             String sessionId = UUID.randomUUID().toString();
@@ -231,6 +282,10 @@ public class ElevateAiTranscriber {
         return TranscriptionResult.fromSessionEnded(endedJson);
     }
 
+    // =========================================================================
+    // WebSocket helpers
+    // =========================================================================
+
     private static WebSocket connectWebSocket(HttpClient client, URI uri, String apiToken,
                                                  WebSocket.Listener listener,
                                                  Consumer<String> onMessage) throws Exception {
@@ -287,76 +342,9 @@ public class ElevateAiTranscriber {
         }
     }
 
-    // --- ffmpeg helpers ---
-
-    private static int detectChannelCount(String inputPath) throws Exception {
-        // Use ffmpeg -i to detect channels (ffprobe may not be available)
-        ProcessBuilder pb = new ProcessBuilder("ffmpeg", "-i", inputPath, "-hide_banner");
-        pb.redirectErrorStream(true);
-        Process proc = pb.start();
-        String output;
-        try (var is = proc.getInputStream()) {
-            output = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-        }
-        proc.waitFor(); // exit code will be non-zero (no output specified) — that's expected
-
-        // Look for "stereo" or "N channels" in the stream info line
-        // e.g. "Stream #0:0: Audio: aac, 44100 Hz, stereo, fltp"
-        // e.g. "Stream #0:0: Audio: pcm_s16le, 16000 Hz, 2 channels, s16"
-        if (output.contains("stereo") || output.contains("2 channels")) {
-            return 2;
-        }
-        return 1;
-    }
-
-    /**
-     * Convert audio to raw PCM. If channelIndex is -1, downmix all channels to mono.
-     * If channelIndex is 0 or 1, extract that specific channel from a stereo file.
-     */
-    private static byte[] convertToPcm(String inputPath, int sampleRate, int channelIndex) throws Exception {
-        var cmd = new ArrayList<String>();
-        cmd.add("ffmpeg");
-        cmd.add("-i");
-        cmd.add(inputPath);
-
-        if (channelIndex >= 0) {
-            // Extract specific channel: pan filter maps the desired channel to mono output
-            cmd.add("-af");
-            cmd.add("pan=1c|c0=c" + channelIndex);
-        }
-
-        cmd.add("-f");
-        cmd.add("s16le");
-        cmd.add("-acodec");
-        cmd.add("pcm_s16le");
-        cmd.add("-ar");
-        cmd.add(String.valueOf(sampleRate));
-        cmd.add("-ac");
-        cmd.add("1");
-        cmd.add("pipe:1");
-
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.redirectErrorStream(false);
-        Process proc = pb.start();
-
-        byte[] pcmData;
-        try (var stdout = proc.getInputStream()) {
-            pcmData = stdout.readAllBytes();
-        }
-
-        int exitCode = proc.waitFor();
-        if (exitCode != 0) {
-            byte[] errBytes;
-            try (var stderr = proc.getErrorStream()) {
-                errBytes = stderr.readAllBytes();
-            }
-            throw new IOException("ffmpeg failed (exit " + exitCode + "): "
-                    + new String(errBytes, StandardCharsets.UTF_8));
-        }
-        return pcmData;
-    }
-
-    // --- WebSocket listener ---
+    // =========================================================================
+    // WebSocket listener
+    // =========================================================================
 
     private static class SessionListener implements WebSocket.Listener {
         private final Consumer<String> onMessage;

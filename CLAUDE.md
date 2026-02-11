@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ElevateAI Real-Time Fast Transcriber — a Java 21 web application that transcribes audio files using the ElevateAI Real-Time WebSocket API. Users upload an audio file (m4a, wav, mp3, etc.), which is converted to raw PCM via ffmpeg and streamed over a WebSocket to ElevateAI for transcription. Live status updates are delivered to the browser via Server-Sent Events (SSE).
+ElevateAI Real-Time Fast Transcriber — a Java 21 web application that transcribes PCM WAV audio files using the ElevateAI Real-Time WebSocket API. Users upload a WAV file (mono or stereo), which is read via `javax.sound.sampled`, split by channel if stereo, and streamed over WebSocket(s) to ElevateAI for transcription. Live status updates are delivered to the browser via Server-Sent Events (SSE).
 
 ## Tech Stack
 
@@ -13,8 +13,8 @@ ElevateAI Real-Time Fast Transcriber — a Java 21 web application that transcri
 - **Template Engine:** Thymeleaf (standalone, no Spring)
 - **JSON:** Gson
 - **CSS:** Bootstrap 5 (CDN)
-- **External dependency:** `ffmpeg` (must be on PATH for audio conversion)
 - **API:** ElevateAI Real-Time WebSocket API (`wss://api.elevateai.com/v1/audio/...`)
+- **No external dependencies** — audio handled via `javax.sound.sampled` (JDK built-in)
 
 ## Build & Run Commands
 
@@ -50,17 +50,18 @@ TranscriberApp-Java/
 ```
 
 **Transcription flow:**
-1. User uploads audio via file input → `POST /upload` saves to temp file, returns `{fileId}`
+1. User uploads WAV file via file input → `POST /upload` saves to temp file, returns `{fileId}`
 2. Browser opens `EventSource` to `GET /transcribe?fileId=...&token=...` (SSE)
-3. Server runs `ffmpeg` via `ProcessBuilder` to produce raw PCM (s16le, mono, 16kHz)
-4. Opens WebSocket to ElevateAI with API token in `X-API-TOKEN` header
-5. Streams PCM in 8 KB chunks as binary frames, then sends `{"type":"sessionEnd"}`
-6. WebSocket listener collects messages, sends each as SSE `data:` to browser
-7. On `sessionEnded`, extracts `punctuatedTranscript.sentenceSegments` and sends as `event: transcript`
+3. Server reads WAV via `javax.sound.sampled`, detects channel count and sample rate
+4. If stereo, deinterleaves PCM bytes into two mono streams (pure byte manipulation)
+5. Opens WebSocket(s) to ElevateAI with API token in `X-API-TOKEN` header
+6. Streams PCM in 8 KB chunks as binary frames, then sends `{"type":"sessionEnd"}`
+7. WebSocket listener collects messages, sends each as SSE `data:` to browser
+8. On `sessionEnded`, extracts `punctuatedTranscript.sentenceSegments` and sends as `event: transcript`
 
 **Key files:**
 - `Main.java` — HTTP server setup, route registration, virtual thread executor
-- `ElevateAiTranscriber.java` — core transcription logic (ffmpeg + WebSocket)
+- `ElevateAiTranscriber.java` — core transcription logic (WAV reading + WebSocket)
 - `TranscribeHandler.java` — SSE endpoint bridging transcriber callbacks to browser
 - `home.html` — single-page UI with JavaScript for upload + EventSource
 
